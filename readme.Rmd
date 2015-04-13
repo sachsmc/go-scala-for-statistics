@@ -1,0 +1,201 @@
+---
+title: "Timing Some Simple Statistics Code in Go and Scala"
+author: "Michael Sachs"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output: 
+    html_document:
+      theme: united
+      highlight: pygments
+---
+
+## Motivation
+
+### Would go and/or scala be useful for statistical computing?
+
+[Go](http://golang.org) is relatively new, is a compiled language that is supposedly fast and easy to write. Go supports [concurrency](https://golang.org/doc/effective_go.html#concurrency), which is a powerful concept and makes it easy to run things in parallel. 
+
+[Scala](http://scala-lang.org/) is object-oriented and functional. Can we write fast code that runs anywhere that there's a Java runtime in the functional style of R? There's at least one vocal proponent of [scala for statistical computing](https://darrenjw.wordpress.com/tag/scala/).
+
+## The Task
+
+The task is to integrate the standard normal probability density function using uniform rejection sampling. The idea is to repeatedly take samples uniformly from the rectangle $(-5, 5) \times (0, 0.5)$ and count the ones that fall below the normal density as successes. The proportion of successes times the area of the rectangle will give us the area under the normal density: 
+
+$$
+\int_{-\infty}^\infty f(x)\, dx \approx 5 \frac{1}{B} \sum_{i = 1}^B 1[U_{yi} < f(U_{xi})],
+$$
+
+where $f(x) = \frac{exp(x^2/2)}{\sqrt{2\pi}}$, $U_y \sim Unif(0, 0.5)$, $U_x \sim Unif(-5, 5)$, and $B$ is a fixed, large number. 
+
+```{r setup, include = FALSE}
+library(ggplot2)
+
+samp_unif <- function(B){
+  
+  U.y <- runif(B, 0, 0.5)
+  U.x <- runif(B, -5, 5)
+  f.U.x <- dnorm(U.x)
+  success <- U.y < f.U.x
+  data.frame(U.x, U.y, f.U.x, success)
+  
+}
+
+```
+
+
+```{r dens, fig.show = 'animate', echo = FALSE}
+set.seed(420)
+df <- samp_unif(100)
+p1 <- ggplot(df, aes(x = U.x, y = U.y, color = success)) + geom_point() +
+  scale_x_continuous(lim = c(-5, 5)) + scale_y_continuous(lim = c(0, .5)) + stat_function(fun = dnorm, color = "black", size = 1) + 
+    ggtitle(paste0("B = ", round(nrow(df), 0), "; Area = ", round(5 * mean(df$success), 2)))
+
+print(p1)
+
+for(i in 1:25){
+  
+  df <- rbind(df, samp_unif(100))
+  print(p1 %+% df + 
+    ggtitle(paste0("B = ", round(nrow(df), 0), "; Area = ", round(5 * mean(df$success), 2))))
+  
+}
+```
+
+
+## The Code
+
+### R Vectorized
+
+```r
+intpdf <- function(N){
+
+  candx <- runif(N, -5, 5)
+  candy <- runif(N, 0, .5)
+
+  5.0 * mean(candy < dnorm(candx)) 
+
+}
+```
+
+### Go
+
+```golang
+```{r gocode, results = "asis", echo = FALSE}
+cat(paste0(readLines("intpdf.go"), collapse = "\n"))
+```
+```
+
+### Go with Concurrency
+
+Like I said, go is trivial to parallelize. Spot the differences between this and the previous code (2 lines)!
+
+```golang
+```{r gocode2, results = "asis", echo = FALSE}
+cat(paste0(readLines("intpdf-concurrent.go"), collapse = "\n"))
+```
+```
+
+### Scala
+
+```scala
+```{r scalacode, results = "asis", echo = FALSE}
+cat(paste0(readLines("intpdf.scala"), collapse = "\n"))
+```
+```
+
+### Rcpp
+
+```cpp
+```{r cppcode, results = "asis", echo = FALSE}
+cat(paste0(readLines("intpdf.cpp"), collapse = "\n"))
+Rcpp::sourceCpp('intpdf.cpp')
+```
+```
+
+## Timing Results
+
+Let's define some R functions that call the compiled versions of these and confirm that they give the same answer (up to Monte Carlo error).
+
+```{r setupcalls}
+library(microbenchmark)
+
+intpdf <- function(N){
+
+  candx <- runif(N, -5, 5)
+  candy <- runif(N, 0, .5)
+
+  5.0 * sum(candy < dnorm(candx)) / N
+
+}
+
+# load cintpdf
+
+Rcpp::sourceCpp("intpdf.cpp")
+
+# go
+
+gintpdf <- function(N){
+
+  retstr <- system2("/Users/sachsmc/go/bin/intpdf",
+                    args = format(N, scientific = FALSE), stdout = TRUE)
+  as.numeric(retstr)
+
+}
+
+# go concurrent
+
+gcintpdf <- function(N){
+
+  retstr <- system2("/Users/sachsmc/go/bin/intpdf-concurrent",
+                    args = format(N, scientific = FALSE), stdout = TRUE)
+  as.numeric(retstr)
+
+}
+
+# scala
+
+sintpdf <- function(N){
+
+  retstr <- system2("/Users/sachsmc/scala-2.11.6/bin/scala",
+                    args = c("-classpath", "/Users/sachsmc/scala/intpdf/", "IntPDF",
+                             format(N, scientific = FALSE)), stdout = TRUE)
+  as.numeric(retstr)
+
+}
+```
+
+```{r check}
+N <- 1e5
+
+intpdf(N)
+cintpdf(N)
+gintpdf(N)
+gcintpdf(N)
+sintpdf(N)
+
+timeit <- function(N, ...){
+  
+  knitr::kable(summary(microbenchmark(intpdf(N),
+               cintpdf(N),
+               gintpdf(N),
+               gcintpdf(N),
+               sintpdf(N), ...)), digits = 0)
+
+  
+}
+```
+
+Now for some timings:
+
+```{r time, cache = TRUE}
+timeit(1e5)
+timeit(1e6, times = 10L)
+timeit(1e7, times = 5L)
+```
+
+## Conclusions
+
+- Rcpp code is fast and relatively easy to write. 
+- Concurrency in go doesn't seem to buy you much unless the thing being evaluated repeatedly is very time consuming. 
+- Go is fun but probably not very useful for statistical computing.
+- Scala is slow except for long jobs. It can be sped up, but requires learning some specialized programming techniques, [like this (pages 18-20)](https://github.com/darrenjw/statslang-scala/blob/master/slides/scala-talk-PREBUILT.pdf)
+- Parallelization is almost trivial in both Go and Scala. Worth considering if you have vast resources, [like Biowulf](http://biowulf.nih.gov/).
